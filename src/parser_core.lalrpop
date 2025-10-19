@@ -1,0 +1,224 @@
+use std::str::FromStr;
+use crate::core::ast_core::{
+    VTR, Command, Term, Type, BaseType, Var, VarWithType, Operation,
+    Handler, HandlerRet, HandlerOp,
+    EffectDecl, TopLevelTerm, TopLevelCommand};
+
+grammar;
+
+pub Term: Box<Term> = {
+    <t:InfixOperations> => t,
+};
+
+InfixOperations: Box<Term> = {
+    #[precedence(level="0")]
+    <t:TermBase> => t,
+
+    #[precedence(level="11")]
+    #[assoc(side="right")]
+    <t1:InfixOperations> "," <t2:InfixOperations> => Box::new(Term::Pair(t1, t2)),
+    
+    #[precedence(level="10")]
+    #[assoc(side="right")]
+    <t1:InfixOperations> "+" <t2:InfixOperations> => Box::new(Term::Plus(t1, t2)),
+};
+
+TermBase: Box<Term> = {
+    #[precedence(level="1")]
+    <n:NumInt> => Box::new(Term::NumInt(n)),
+
+    #[precedence(level="0")]
+    <c:Const> => c,
+
+    #[precedence(level="1")]
+    <v:Var> => Box::new(Term::Var(v)),
+
+    #[precedence(level="0")]
+    "(" <t:Term> ")" => t,
+
+    #[precedence(level="2")]
+    #[assoc(side="left")]
+    <t1:TermBase> <t2:TermBase> => Box::new(Term::App(t1, t2)),
+
+    #[precedence(level="1")]
+    #[assoc(side="left")]
+    "proj1" <t:TermBase> => Box::new(Term::Fst(t)),
+    
+    #[precedence(level="1")]
+    #[assoc(side="left")]
+    "proj2" <t:TermBase> => Box::new(Term::Snd(t)),
+
+    #[precedence(level="20")]
+    #[assoc(side="right")]
+    "let" <vt:VarWithType> "=" <t1:TermBase> "in" <t2:TermBase> => Box::new(Term::App(Box::new(Term::Lam(vt, t2)), t1)),
+
+    #[precedence(level="20")]
+    #[assoc(side="right")]
+    "fn" <vt:VarWithType> "-->" "{" <t:Term> "}" => Box::new(Term::Lam(vt, t)),
+    
+    #[precedence(level="20")]
+    #[assoc(side="right")]
+    "ar" <vt:VarWithType> "~~>" "{" <c:Command> "}" => Box::new(Term::CLam(vt, c)),
+};
+
+pub Command: Box<Command> = {
+    "return" <t:Term> => Box::new(Command::Return(VTR::T(t))),
+
+    <o:Operation> <t:Term> => Box::new(Command::DoOp(o, t)),
+
+    "handle" <c:Command> "with" "{" <h:Handler> "}" =>
+        Box::new(Command::Handle(c, h, None)),
+
+    "(" <c:Command> ")" => c,
+
+    "let" <vt:VarWithType> "<~" <c1:Command> "in" <c2:Command> =>
+        Box::new(Command::Let(vt, c1, c2, None)),
+
+    "let" <vt:VarWithType> "<-" <t:Term> "in" <c:Command> =>
+        Box::new(Command::CApp(Box::new(Term::CLam(vt, c)), t)),
+
+    <t1:Term> "@" <t2:Term> => Box::new(Command::CApp(t1, t2)),
+};
+
+
+pub Handler: Handler = {
+    "return" <vt:VarWithType> "=>" "{" <c:Command> "}" <c_ops:HandlerOp*> =>
+        Handler::H(HandlerRet::HRet(vt, c), c_ops),
+};
+
+HandlerOp: HandlerOp = {
+    <o:Operation> <k_vt:VarWithType> ";" <z_vt:VarWithType> "=>" "{" <c:Command> "}" => HandlerOp::HOp(o, k_vt, z_vt, c),
+};
+
+BaseType: BaseType = {
+    "Int"  => BaseType::Int,
+    "Unit" => BaseType::Unit,
+};
+
+Type: Type = {
+    <t:TypeFunc> => t,
+};
+
+TypeFunc: Type = {
+    <t1:TypeProd> "->" <t2:TypeFunc> => Type::Fun(Box::new(t1), Box::new(t2)),
+    <t1:TypeProd> "~>" <t2:TypeFunc> => Type::Arr(Box::new(t1), Box::new(t2)),
+    <t:TypeProd> => t,
+};
+
+TypeProd: Type = {
+    <t1:TypeList> "*" <t2:TypeProd> => Type::Prod(Box::new(t1), Box::new(t2)),
+    <t:TypeList> => t,
+};
+
+TypeList: Type = {
+    <t:TypeB> => t,
+};
+
+TypeB: Type = {
+    <bt:BaseType> => Type::Base(bt),
+    "(" <t:Type> ")" => t,
+};
+
+
+VarWithType: VarWithType = {
+    <v:Var> ":" <typ:Type> => {
+        match v {
+            Var::V(vname) => {
+                VarWithType::VT(vname, typ)
+            }
+        }
+    }
+};
+
+Const: Box<Term> = {
+    "()"  => Box::new(Term::Unt),
+};
+
+Var: Var = {
+    <vname:r"[a-z][a-zA-Z0-9_]*"> => Var::V(vname.to_string()),
+};
+
+Operation: Operation = {
+    <opname:r"[A-Z][a-zA-Z0-9_]*"> => Operation::Op(opname.to_string()),
+};
+
+NumInt: i32 = {
+    <n:r"[0-9]+"> => FromStr::from_str(n).unwrap(),
+};
+
+pub EffectDecls: Vec<EffectDecl> = {
+    #[precedence(level="1")]
+    <es:EffectDecl> => vec![es],
+
+    #[precedence(level="10")]
+    #[assoc(side="left")]
+    <es1:EffectDecls> "|" <es2:EffectDecls> => {
+        let mut es1 = es1;
+        es1.extend(es2);
+        es1
+    },
+};
+
+EffectDecl: EffectDecl = {
+    <op:Operation> ":" <t:Type> => {
+        match t {
+            Type::Arr(t1, t2) => (op, *t1, *t2),
+            _ => panic!("EffectDecl: {:?} is not an arrow type", t),
+        }
+    },
+};
+
+TopLevelEffectDecl: Vec<EffectDecl> = {
+    "effect" "{" <effect_decls:EffectDecls> "}" => {
+        effect_decls
+    }
+};
+
+TopLevelTerm: TopLevelTerm = {
+    "function" <func:Var> <arg:VarWithType> "-->" <ret_typ:Type> "{" <t:Term> "}" => {
+        (func, arg, ret_typ, *t)
+    }
+};
+
+TopLevelCommand: TopLevelCommand = {
+    "arrow" <arr:Var> <arg:VarWithType> ";" <arg_com:VarWithType> "~~>" <ret_typ:Type> "{" <c:Command> "}" => {
+        (arr, arg, arg_com, ret_typ, *c)
+    }
+};
+
+pub TopLevel: (Vec<EffectDecl>, Vec<TopLevelTerm>, Vec<TopLevelCommand>) = {
+    <effect_decls:TopLevelEffectDecl> <top_level:TopLevel?> => {
+        let mut ed1 = effect_decls;
+        match top_level {
+            Some((ed2, tlts, tlcs)) => {
+                ed1.extend(ed2);
+                (ed1, tlts, tlcs)
+            }
+            None => {
+                (ed1, Vec::new(), Vec::new())
+            }
+        }
+    },
+    <tlt:TopLevelTerm> <top_level:TopLevel?> => {
+        match top_level {
+            Some((ed, mut tlts, tlcs)) => {
+                tlts.push(tlt.clone());
+                (ed, tlts, tlcs)
+            }
+            None => {
+                (Vec::new(), vec![tlt], Vec::new())
+            }
+        }
+    },
+    <tlc:TopLevelCommand> <top_level:TopLevel?> => {
+        match top_level {
+            Some((ed, tlts, mut tlcs)) => {
+                tlcs.push(tlc.clone());
+                (ed, tlts, tlcs)
+            }
+            None => {
+                (Vec::new(), Vec::new(), vec![tlc])
+            }
+        }
+    },
+};
